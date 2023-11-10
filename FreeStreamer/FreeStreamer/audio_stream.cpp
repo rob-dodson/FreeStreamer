@@ -63,7 +63,7 @@ static CFStringRef coreAudioErrorToCFString(CFStringRef basicErrorDescription, O
         str[0] = str[5] = '\'';
         str[6] = '\0';
     } else {
-        sprintf(str, "%d", (int)error);
+        snprintf(str, sizeof(str), "%d",(int)error);
     }
     
     CFStringRef formattedError = CFStringCreateWithFormat(NULL,
