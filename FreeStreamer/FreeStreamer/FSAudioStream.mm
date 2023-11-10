@@ -928,7 +928,7 @@ public:
         self.onStateChange(streamerState);
     }
     
-    NSDictionary *userInfo = @{FSAudioStreamNotificationKey_State: [NSNumber numberWithInt:streamerState],
+    NSDictionary *userInfo = @{FSAudioStreamNotificationKey_State: [NSNumber numberWithInteger:streamerState],
                                FSAudioStreamNotificationKey_Stream: [NSValue valueWithPointer:_audioStream]};
     NSNotification *notification = [NSNotification notificationWithName:FSAudioStreamStateChangeNotification object:self.stream userInfo:userInfo];
     
