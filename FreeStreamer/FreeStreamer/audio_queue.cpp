@@ -482,8 +482,7 @@ void Audio_Queue::enqueueBuffer()
     m_packetsFilled = 0;
     
     // wait until next buffer is not in use
-    
-    while (m_bufferInUse[m_fillBufferIndex]) {
+    while (m_bufferInUse != nil && m_bufferInUse[m_fillBufferIndex]) {
         AQ_TRACE("waiting for buffer %u\n", (unsigned int)m_fillBufferIndex);
         
         pthread_cond_wait(&m_bufferFreeCondition, &m_bufferInUseMutex);
