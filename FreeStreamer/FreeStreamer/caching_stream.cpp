@@ -10,6 +10,7 @@
 #include "file_output.h"
 #include "stream_configuration.h"
 #include "file_stream.h"
+#include "DeprecationSupport.h"
 
 //#define CS_DEBUG 1
 
@@ -77,7 +78,7 @@ CFURLRef Caching_Stream::createFileURLWithPath(CFStringRef path)
         return fileUrl;
     }
     
-    CFStringRef escapedPath = CFURLCreateStringByAddingPercentEscapes(kCFAllocatorDefault, path, NULL, NULL, kCFStringEncodingUTF8);
+    CFStringRef escapedPath = DeprecationSupport::stringByAddingPercentEncodingWithAllowedCharacters(path);
     
     CFURLRef regularUrl = CFURLCreateWithString(kCFAllocatorDefault, (escapedPath ? escapedPath : path), NULL);
     
@@ -85,10 +86,6 @@ CFURLRef Caching_Stream::createFileURLWithPath(CFStringRef path)
         fileUrl = CFURLCreateFilePathURL(kCFAllocatorDefault, regularUrl, NULL);
 
         CFRelease(regularUrl);
-    }
-    
-    if (escapedPath) {
-        CFRelease(escapedPath);
     }
     
     return fileUrl;
