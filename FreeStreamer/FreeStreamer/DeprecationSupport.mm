@@ -1,6 +1,7 @@
 //
 //
 //
+#include <Foundation/Foundation.h>
 #include "DeprecationSupport.h"
 
 DeprecationSupport::DeprecationSupport()
@@ -32,7 +33,7 @@ CFStringRef DeprecationSupport::stringByAddingPercentEncodingWithAllowedCharacte
 {
     NSString* nspath = (__bridge NSString *)path;
     
-    NSString* newpath = [nspath stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
+    NSString* newpath = [nspath stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
     
     return (__bridge CFStringRef)newpath;
 }
