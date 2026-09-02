@@ -710,45 +710,122 @@ void HTTP_Stream::parseICYStream(const UInt8 *buf, const CFIndex bufSize)
     }
 }
     
-#define TRY_ENCODING(STR,ENC) STR = CFStringCreateWithBytes(kCFAllocatorDefault, bytes, numBytes, ENC, false); \
-    if (STR != NULL) { return STR; }
-    
+static bool metadataLooksMisdecoded(CFStringRef str)
+{
+    return CFStringFind(str, CFSTR("Ã"), 0).location != kCFNotFound ||
+           CFStringFind(str, CFSTR("Â"), 0).location != kCFNotFound ||
+           CFStringFind(str, CFSTR("â"), 0).location != kCFNotFound;
+}
+
+static CFStringRef createStringByRoundTrippingEncoding(CFStringRef str,
+                                                       CFStringEncoding sourceEncoding,
+                                                       CFStringEncoding targetEncoding)
+{
+    if (!str) {
+        return NULL;
+    }
+
+    CFIndex length = CFStringGetLength(str);
+    CFIndex maxBytes = CFStringGetMaximumSizeForEncoding(length, sourceEncoding);
+    if (maxBytes <= 0) {
+        return NULL;
+    }
+
+    std::vector<UInt8> bytes(maxBytes);
+    CFIndex usedBytes = 0;
+    CFIndex converted = CFStringGetBytes(str,
+                                         CFRangeMake(0, length),
+                                         sourceEncoding,
+                                         0,
+                                         false,
+                                         &bytes[0],
+                                         maxBytes,
+                                         &usedBytes);
+    if (converted == 0 || usedBytes == 0) {
+        return NULL;
+    }
+
+    return CFStringCreateWithBytes(kCFAllocatorDefault,
+                                   &bytes[0],
+                                   usedBytes,
+                                   targetEncoding,
+                                   false);
+}
+
+static CFStringRef repairedMetadataString(CFStringRef str)
+{
+    if (!str) {
+        return NULL;
+    }
+
+    if (!metadataLooksMisdecoded(str)) {
+        return (CFStringRef)CFRetain(str);
+    }
+
+    CFStringRef repaired = createStringByRoundTrippingEncoding(str,
+                                                               kCFStringEncodingWindowsLatin1,
+                                                               kCFStringEncodingUTF8);
+    if (repaired) {
+        return repaired;
+    }
+
+    repaired = createStringByRoundTrippingEncoding(str,
+                                                   kCFStringEncodingISOLatin1,
+                                                   kCFStringEncodingUTF8);
+    if (repaired) {
+        return repaired;
+    }
+
+    return (CFStringRef)CFRetain(str);
+}
+
 CFStringRef HTTP_Stream::createMetaDataStringWithMostReasonableEncoding(const UInt8 *bytes, const CFIndex numBytes)
 {
-    CFStringRef metaData;
-    
-    TRY_ENCODING(metaData, kCFStringEncodingUTF8);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin1);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsLatin1);
-    TRY_ENCODING(metaData, kCFStringEncodingNextStepLatin);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin2);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin3);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin4);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatinCyrillic);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatinArabic);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatinGreek);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatinHebrew);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin5);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin6);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatinThai);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin7);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin8);
-    TRY_ENCODING(metaData, kCFStringEncodingISOLatin9);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsLatin2);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsCyrillic);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsGreek);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsLatin5);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsHebrew);
-    TRY_ENCODING(metaData, kCFStringEncodingWindowsArabic);
-    TRY_ENCODING(metaData, kCFStringEncodingKOI8_R);
-    TRY_ENCODING(metaData, kCFStringEncodingBig5);
-    TRY_ENCODING(metaData, kCFStringEncodingASCII);
-    
-    return metaData;
+    const CFStringEncoding encodings[] = {
+        kCFStringEncodingUTF8,
+        kCFStringEncodingWindowsLatin1,
+        kCFStringEncodingISOLatin1,
+        kCFStringEncodingNextStepLatin,
+        kCFStringEncodingISOLatin2,
+        kCFStringEncodingISOLatin3,
+        kCFStringEncodingISOLatin4,
+        kCFStringEncodingISOLatinCyrillic,
+        kCFStringEncodingISOLatinArabic,
+        kCFStringEncodingISOLatinGreek,
+        kCFStringEncodingISOLatinHebrew,
+        kCFStringEncodingISOLatin5,
+        kCFStringEncodingISOLatin6,
+        kCFStringEncodingISOLatinThai,
+        kCFStringEncodingISOLatin7,
+        kCFStringEncodingISOLatin8,
+        kCFStringEncodingISOLatin9,
+        kCFStringEncodingWindowsLatin2,
+        kCFStringEncodingWindowsCyrillic,
+        kCFStringEncodingWindowsGreek,
+        kCFStringEncodingWindowsLatin5,
+        kCFStringEncodingWindowsHebrew,
+        kCFStringEncodingWindowsArabic,
+        kCFStringEncodingKOI8_R,
+        kCFStringEncodingBig5,
+        kCFStringEncodingASCII
+    };
+
+    for (size_t i = 0; i < sizeof(encodings) / sizeof(encodings[0]); ++i) {
+        CFStringRef metaData = CFStringCreateWithBytes(kCFAllocatorDefault,
+                                                       bytes,
+                                                       numBytes,
+                                                       encodings[i],
+                                                       false);
+        if (metaData != NULL) {
+            CFStringRef repaired = repairedMetadataString(metaData);
+            CFRelease(metaData);
+            return repaired;
+        }
+    }
+
+    return NULL;
 }
-    
-#undef TRY_ENCODING
-    
+
 void HTTP_Stream::readCallBack(CFReadStreamRef stream, CFStreamEventType eventType, void *clientCallBackInfo)
 {
     HTTP_Stream *THIS = static_cast<HTTP_Stream*>(clientCallBackInfo);

@@ -10,7 +10,6 @@
 #include "file_output.h"
 #include "stream_configuration.h"
 #include "file_stream.h"
-#include "DeprecationSupport.h"
 
 //#define CS_DEBUG 1
 
@@ -78,20 +77,7 @@ CFURLRef Caching_Stream::createFileURLWithPath(CFStringRef path)
         return fileUrl;
     }
     
-    CFStringRef escapedPath = CFURLCreateStringByAddingPercentEscapes(kCFAllocatorDefault, path, NULL, NULL, kCFStringEncodingUTF8);
-
-       
-    CFURLRef regularUrl = CFURLCreateWithString(kCFAllocatorDefault, (escapedPath ? escapedPath : path), NULL);
-    
-    if (regularUrl) {
-        fileUrl = CFURLCreateFilePathURL(kCFAllocatorDefault, regularUrl, NULL);
-
-        CFRelease(regularUrl);
-    }
-    
-    if (escapedPath) {
-        CFRelease(escapedPath);
-    }
+    fileUrl = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, path, kCFURLPOSIXPathStyle, false);
     
     return fileUrl;
 }
@@ -253,8 +239,8 @@ void Caching_Stream::setCacheIdentifier(CFStringRef cacheIdentifier)
     
     Stream_Configuration *config = Stream_Configuration::configuration();
     
-    CFStringRef filePath = CFStringCreateWithFormat(NULL, NULL, CFSTR("file://%@/%@"), config->cacheDirectory, m_cacheIdentifier);
-    CFStringRef metaDataPath = CFStringCreateWithFormat(NULL, NULL, CFSTR("file://%@/%@.metadata"), config->cacheDirectory, m_cacheIdentifier);
+    CFStringRef filePath = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@/%@"), config->cacheDirectory, m_cacheIdentifier);
+    CFStringRef metaDataPath = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@/%@.metadata"), config->cacheDirectory, m_cacheIdentifier);
     
     if (m_fileUrl) {
         CFRelease(m_fileUrl);
