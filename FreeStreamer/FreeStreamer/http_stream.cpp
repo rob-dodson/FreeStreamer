@@ -11,6 +11,12 @@
 #include "id3_parser.h"
 #include "stream_configuration.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
 //#define HS_DEBUG 1
 
 #if !defined (HS_DEBUG)
@@ -28,16 +34,74 @@
 
 namespace astreamer {
 
-CFStringRef HTTP_Stream::httpRequestMethod   = CFSTR("GET");
-CFStringRef HTTP_Stream::httpUserAgentHeader = CFSTR("User-Agent");
-CFStringRef HTTP_Stream::httpRangeHeader     = CFSTR("Range");
-CFStringRef HTTP_Stream::icyMetaDataHeader = CFSTR("Icy-MetaData");
-CFStringRef HTTP_Stream::icyMetaDataValue  = CFSTR("1"); /* always request ICY metadata, if available */
+static bool appendCFStringToUTF8String(std::string& destination, CFStringRef source)
+{
+    if (!source) {
+        return false;
+    }
 
-    
+    CFIndex length = CFStringGetLength(source);
+    CFIndex maxBytes = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+    if (maxBytes <= 0) {
+        return false;
+    }
+
+    std::vector<char> buffer(maxBytes);
+    if (!CFStringGetCString(source, &buffer[0], maxBytes, kCFStringEncodingUTF8)) {
+        return false;
+    }
+
+    destination.append(&buffer[0]);
+    return true;
+}
+
+static std::string stringByTrimmingHTTPWhitespace(const std::string& value)
+{
+    std::string::size_type first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return std::string();
+    }
+
+    std::string::size_type last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+static std::string lowercaseString(const std::string& value)
+{
+    std::string lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return lowered;
+}
+
+static bool stringHasPrefix(const std::string& value, const char *prefix)
+{
+    return value.compare(0, strlen(prefix), prefix) == 0;
+}
+
+static CFStringRef createHeaderValueString(const std::string& value)
+{
+    CFStringRef string = CFStringCreateWithBytes(kCFAllocatorDefault,
+                                                 reinterpret_cast<const UInt8 *>(value.data()),
+                                                 value.length(),
+                                                 kCFStringEncodingUTF8,
+                                                 false);
+    if (string) {
+        return string;
+    }
+
+    return CFStringCreateWithBytes(kCFAllocatorDefault,
+                                   reinterpret_cast<const UInt8 *>(value.data()),
+                                   value.length(),
+                                   kCFStringEncodingISOLatin1,
+                                   false);
+}
+
 /* HTTP_Stream: public */
 HTTP_Stream::HTTP_Stream() :
     m_readStream(0),
+    m_writeStream(0),
     m_scheduledInRunLoop(false),
     m_readPending(false),
     m_url(0),
@@ -146,6 +210,7 @@ bool HTTP_Stream::open(const Input_Stream_Position& position)
     
     m_readPending = false;
     m_httpHeadersParsed = false;
+    m_httpHeaderData.clear();
     
     if (m_contentType) {
         CFRelease(m_contentType);
@@ -220,6 +285,12 @@ void HTTP_Stream::close()
     CFReadStreamClose(m_readStream);
     CFRelease(m_readStream);
     m_readStream = 0;
+
+    if (m_writeStream) {
+        CFWriteStreamClose(m_writeStream);
+        CFRelease(m_writeStream);
+        m_writeStream = 0;
+    }
 }
     
 void HTTP_Stream::setScheduledInRunLoop(bool scheduledInRunLoop)
@@ -302,204 +373,322 @@ void HTTP_Stream::id3tagSizeAvailable(UInt32 tagSize)
 CFReadStreamRef HTTP_Stream::createReadStream(CFURLRef url)
 {
     CFReadStreamRef readStream = 0;
-    CFHTTPMessageRef request = 0;
-    CFDictionaryRef proxySettings = 0;
-    
-    Stream_Configuration *config = Stream_Configuration::configuration();
-    
-    if (!(request = CFHTTPMessageCreateRequest(kCFAllocatorDefault, httpRequestMethod, url, kCFHTTPVersion1_1))) {
+    CFWriteStreamRef writeStream = 0;
+    CFStringRef host = CFURLCopyHostName(url);
+    CFStringRef scheme = CFURLCopyScheme(url);
+    SInt32 port = 0;
+    bool usesTLS = false;
+
+    if (!host || !scheme) {
         goto out;
     }
-    
-    if (config->userAgent) {
-        CFHTTPMessageSetHeaderFieldValue(request, httpUserAgentHeader, config->userAgent);
+
+    port = CFURLGetPortNumber(url);
+    usesTLS = CFStringCompare(scheme, CFSTR("https"), kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+    if (port <= 0) {
+        port = usesTLS ? 443 : 80;
     }
-    
-    CFHTTPMessageSetHeaderFieldValue(request, icyMetaDataHeader, icyMetaDataValue);
-    
-    if (m_position.start > 0 && m_position.end > m_position.start) {
-        CFStringRef rangeHeaderValue = CFStringCreateWithFormat(NULL,
-                                                                NULL,
-                                                                CFSTR("bytes=%llu-%llu"),
-                                                                m_position.start,
-                                                                m_position.end);
-        
-        CFHTTPMessageSetHeaderFieldValue(request, httpRangeHeader, rangeHeaderValue);
-        CFRelease(rangeHeaderValue);
-    } else if (m_position.start > 0 && m_position.end < m_position.start) {
-        CFStringRef rangeHeaderValue = CFStringCreateWithFormat(NULL,
-                                                                NULL,
-                                                                CFSTR("bytes=%llu-"),
-                                                                m_position.start);
-        CFHTTPMessageSetHeaderFieldValue(request, httpRangeHeader, rangeHeaderValue);
-        CFRelease(rangeHeaderValue);
+
+    CFStreamCreatePairWithSocketToHost(kCFAllocatorDefault, host, port, &readStream, &writeStream);
+    if (!readStream || !writeStream) {
+        goto out;
     }
-    
-    
-    if (config->predefinedHttpHeaderValues) {
-        const CFIndex numKeys = CFDictionaryGetCount(config->predefinedHttpHeaderValues);
-        
-        if (numKeys > 0) {
-            CFTypeRef *keys = (CFTypeRef *) malloc(numKeys * sizeof(CFTypeRef));
-            
-            if (keys) {
-                CFDictionaryGetKeysAndValues(config->predefinedHttpHeaderValues, (const void **) keys, NULL);
-                
-                for (CFIndex i=0; i < numKeys; i++) {
-                    CFTypeRef key = keys[i];
-                    
-                    if (CFGetTypeID(key) == CFStringGetTypeID()) {
-                        const void *value = CFDictionaryGetValue(config->predefinedHttpHeaderValues, (const void *) key);
-                        
-                        if (value) {
-                            CFStringRef headerKey = (CFStringRef) key;
-                            
-                            CFTypeRef valueRef = (CFTypeRef) value;
-                            
-                            if (CFGetTypeID(valueRef) == CFStringGetTypeID()) {
-                                CFStringRef headerValue = (CFStringRef) valueRef;
-                                
-                                HS_TRACE("Setting predefined HTTP header ");
-                                HS_TRACE_CFSTRING(headerKey);
-                                HS_TRACE_CFSTRING(headerValue);
-                                
-                                CFHTTPMessageSetHeaderFieldValue(request, headerKey, headerValue);
+
+    CFReadStreamSetProperty(readStream, kCFStreamPropertyShouldCloseNativeSocket, kCFBooleanTrue);
+    CFWriteStreamSetProperty(writeStream, kCFStreamPropertyShouldCloseNativeSocket, kCFBooleanTrue);
+
+    if (usesTLS) {
+        CFReadStreamSetProperty(readStream, kCFStreamPropertySocketSecurityLevel, kCFStreamSocketSecurityLevelNegotiatedSSL);
+        CFWriteStreamSetProperty(writeStream, kCFStreamPropertySocketSecurityLevel, kCFStreamSocketSecurityLevelNegotiatedSSL);
+    }
+
+    if (!sendHTTPRequest(writeStream, url)) {
+        goto out;
+    }
+
+    m_writeStream = writeStream;
+    writeStream = 0;
+
+out:
+    if (host) {
+        CFRelease(host);
+    }
+    if (scheme) {
+        CFRelease(scheme);
+    }
+    if (writeStream) {
+        CFWriteStreamClose(writeStream);
+        CFRelease(writeStream);
+    }
+    if (!m_writeStream && readStream) {
+        CFRelease(readStream);
+        readStream = 0;
+    }
+
+    return readStream;
+}
+
+bool HTTP_Stream::sendHTTPRequest(CFWriteStreamRef writeStream, CFURLRef url)
+{
+    CFStringRef host = CFURLCopyHostName(url);
+    CFStringRef path = CFURLCopyPath(url);
+    CFStringRef query = CFURLCopyQueryString(url, NULL);
+    CFStringRef scheme = CFURLCopyScheme(url);
+    bool success = false;
+
+    if (host && scheme) {
+        std::string request;
+        request += "GET ";
+        if (path && CFStringGetLength(path) > 0) {
+            appendCFStringToUTF8String(request, path);
+        } else {
+            request += "/";
+        }
+        if (query && CFStringGetLength(query) > 0) {
+            request += "?";
+            appendCFStringToUTF8String(request, query);
+        }
+        request += " HTTP/1.1\r\nHost: ";
+        appendCFStringToUTF8String(request, host);
+
+        SInt32 port = CFURLGetPortNumber(url);
+        const bool usesTLS = CFStringCompare(scheme, CFSTR("https"), kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+        if ((port > 0) && ((usesTLS && port != 443) || (!usesTLS && port != 80))) {
+            char portBuffer[16];
+            snprintf(portBuffer, sizeof(portBuffer), ":%d", static_cast<int>(port));
+            request += portBuffer;
+        }
+        request += "\r\n";
+
+        Stream_Configuration *config = Stream_Configuration::configuration();
+        if (config->userAgent) {
+            request += "User-Agent: ";
+            appendCFStringToUTF8String(request, config->userAgent);
+            request += "\r\n";
+        }
+
+        request += "Icy-MetaData: 1\r\n";
+
+        if (m_position.start > 0 && m_position.end > m_position.start) {
+            char rangeHeader[64];
+            snprintf(rangeHeader, sizeof(rangeHeader), "Range: bytes=%llu-%llu\r\n", m_position.start, m_position.end);
+            request += rangeHeader;
+        } else if (m_position.start > 0 && m_position.end < m_position.start) {
+            char rangeHeader[64];
+            snprintf(rangeHeader, sizeof(rangeHeader), "Range: bytes=%llu-\r\n", m_position.start);
+            request += rangeHeader;
+        }
+
+        if (config->predefinedHttpHeaderValues) {
+            const CFIndex numKeys = CFDictionaryGetCount(config->predefinedHttpHeaderValues);
+
+            if (numKeys > 0) {
+                CFTypeRef *keys = (CFTypeRef *) malloc(numKeys * sizeof(CFTypeRef));
+
+                if (keys) {
+                    CFDictionaryGetKeysAndValues(config->predefinedHttpHeaderValues, (const void **) keys, NULL);
+
+                    for (CFIndex i=0; i < numKeys; i++) {
+                        CFTypeRef key = keys[i];
+
+                        if (CFGetTypeID(key) == CFStringGetTypeID()) {
+                            const void *value = CFDictionaryGetValue(config->predefinedHttpHeaderValues, (const void *) key);
+
+                            if (value) {
+                                CFTypeRef valueRef = (CFTypeRef) value;
+
+                                if (CFGetTypeID(valueRef) == CFStringGetTypeID()) {
+                                    appendCFStringToUTF8String(request, (CFStringRef) key);
+                                    request += ": ";
+                                    appendCFStringToUTF8String(request, (CFStringRef) valueRef);
+                                    request += "\r\n";
+                                }
                             }
                         }
                     }
+
+                    free(keys);
                 }
-                
-                free(keys);
+            }
+        }
+
+        request += "Connection: close\r\n\r\n";
+
+        if (CFWriteStreamOpen(writeStream)) {
+            const UInt8 *bytes = reinterpret_cast<const UInt8 *>(request.data());
+            CFIndex bytesRemaining = request.length();
+            success = true;
+
+            while (bytesRemaining > 0) {
+                CFIndex bytesWritten = CFWriteStreamWrite(writeStream, bytes, bytesRemaining);
+                if (bytesWritten <= 0) {
+                    success = false;
+                    break;
+                }
+                bytes += bytesWritten;
+                bytesRemaining -= bytesWritten;
             }
         }
     }
-    
-    if (!(readStream = CFReadStreamCreateForHTTPRequest(kCFAllocatorDefault, request))) {
-        goto out;
+
+    if (host) {
+        CFRelease(host);
     }
-    
-    CFReadStreamSetProperty(readStream,
-                            kCFStreamNetworkServiceType,
-                            kCFStreamNetworkServiceTypeBackground);
-    
-    CFReadStreamSetProperty(readStream,
-                            kCFStreamPropertyHTTPShouldAutoredirect,
-                            kCFBooleanTrue);
-    
-    proxySettings = CFNetworkCopySystemProxySettings();
-    if (proxySettings) {
-        CFReadStreamSetProperty(readStream, kCFStreamPropertyHTTPProxy, proxySettings);
-        CFRelease(proxySettings);
+    if (path) {
+        CFRelease(path);
     }
-    
-out:
-    if (request) {
-        CFRelease(request);
+    if (query) {
+        CFRelease(query);
     }
-    
-    return readStream;
+    if (scheme) {
+        CFRelease(scheme);
+    }
+    return success;
 }
     
-void HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize)
+bool HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize, CFIndex *bodyOffset)
 {
+    if (bodyOffset) {
+        *bodyOffset = 0;
+    }
+
     if (m_httpHeadersParsed) {
-        return;
+        return true;
     }
-    m_httpHeadersParsed = true;
-    
-    /* If the response has the "ICY 200 OK" string,
-     * we are dealing with the ShoutCast protocol.
-     * The HTTP headers won't be available.
-     */
-    if (bufSize >= 10 &&
-        buf[0] == 0x49 && buf[1] == 0x43 && buf[2] == 0x59 &&
-        buf[3] == 0x20 && buf[4] == 0x32 && buf[5] == 0x30 &&
-        buf[6] == 0x30 && buf[7] == 0x20 && buf[8] == 0x4F &&
-        buf[9] == 0x4B) {
+
+    const size_t previousSize = m_httpHeaderData.size();
+    m_httpHeaderData.insert(m_httpHeaderData.end(), buf, buf + bufSize);
+
+    if (m_httpHeaderData.size() >= 10 &&
+        m_httpHeaderData[0] == 0x49 && m_httpHeaderData[1] == 0x43 && m_httpHeaderData[2] == 0x59 &&
+        m_httpHeaderData[3] == 0x20 && m_httpHeaderData[4] == 0x32 && m_httpHeaderData[5] == 0x30 &&
+        m_httpHeaderData[6] == 0x30 && m_httpHeaderData[7] == 0x20 && m_httpHeaderData[8] == 0x4F &&
+        m_httpHeaderData[9] == 0x4B) {
+        m_httpHeadersParsed = true;
         m_icyStream = true;
-        
+        m_httpHeaderData.clear();
+
         HS_TRACE("Detected an IceCast stream\n");
-        
-        // This is an ICY stream, don't try to parse the HTTP headers
-        return;
+        return true;
     }
-    
+
+    if (m_httpHeaderData.size() < 4) {
+        return false;
+    }
+
+    size_t headerEnd = std::string::npos;
+    size_t delimiterLength = 0;
+    for (size_t i = 0; i + 3 < m_httpHeaderData.size(); ++i) {
+        if (m_httpHeaderData[i] == '\r' && m_httpHeaderData[i + 1] == '\n' &&
+            m_httpHeaderData[i + 2] == '\r' && m_httpHeaderData[i + 3] == '\n') {
+            headerEnd = i;
+            delimiterLength = 4;
+            break;
+        }
+    }
+
+    if (headerEnd == std::string::npos) {
+        for (size_t i = 0; i + 1 < m_httpHeaderData.size(); ++i) {
+            if (m_httpHeaderData[i] == '\n' && m_httpHeaderData[i + 1] == '\n') {
+                headerEnd = i;
+                delimiterLength = 2;
+                break;
+            }
+        }
+    }
+
+    if (headerEnd == std::string::npos) {
+        return false;
+    }
+
+    m_httpHeadersParsed = true;
     HS_TRACE("A regular HTTP stream\n");
-    
-    CFHTTPMessageRef response = (CFHTTPMessageRef)CFReadStreamCopyProperty(m_readStream, kCFStreamPropertyHTTPResponseHeader);
+
+    std::string headers(reinterpret_cast<const char *>(&m_httpHeaderData[0]), headerEnd);
     CFIndex statusCode = 0;
-    
-    if (response) {
-        /*
-         * If the server responded with the icy-metaint header, the response
-         * body will be encoded in the ShoutCast protocol.
-         */
-        CFStringRef icyMetaIntString = CFHTTPMessageCopyHeaderFieldValue(response, CFSTR("icy-metaint"));
-        if (icyMetaIntString) {
-            m_icyStream = true;
-            m_icyHeadersParsed = true;
-            m_icyHeadersRead = true;
-            m_icyMetaDataInterval = CFStringGetIntValue(icyMetaIntString);
-            CFRelease(icyMetaIntString);
+
+    size_t lineStart = 0;
+    bool firstLine = true;
+    while (lineStart <= headers.length()) {
+        size_t lineEnd = headers.find('\n', lineStart);
+        if (lineEnd == std::string::npos) {
+            lineEnd = headers.length();
         }
-        
-        HS_TRACE("icy-metaint: %zu\n", m_icyMetaDataInterval);
-        
-        statusCode = CFHTTPMessageGetResponseStatusCode(response);
-        
-        HS_TRACE("HTTP response code %zu", statusCode);
-        
-        CFStringRef icyNameString = CFHTTPMessageCopyHeaderFieldValue(response, CFSTR("icy-name"));
-        if (icyNameString) {
-            if (m_icyName) {
-                CFRelease(m_icyName);
+
+        std::string line = stringByTrimmingHTTPWhitespace(headers.substr(lineStart, lineEnd - lineStart));
+        if (!line.empty()) {
+            if (firstLine) {
+                if (stringHasPrefix(line, "HTTP/")) {
+                    size_t statusStart = line.find(' ');
+                    if (statusStart != std::string::npos) {
+                        statusCode = static_cast<CFIndex>(strtol(line.c_str() + statusStart + 1, NULL, 10));
+                    }
+                }
+                firstLine = false;
+            } else {
+                size_t separator = line.find(':');
+                if (separator != std::string::npos) {
+                    std::string fieldName = lowercaseString(stringByTrimmingHTTPWhitespace(line.substr(0, separator)));
+                    std::string fieldValue = stringByTrimmingHTTPWhitespace(line.substr(separator + 1));
+
+                    if (fieldName == "icy-metaint") {
+                        m_icyStream = true;
+                        m_icyHeadersParsed = true;
+                        m_icyHeadersRead = true;
+                        m_icyMetaDataInterval = strtoull(fieldValue.c_str(), NULL, 10);
+                    } else if (fieldName == "icy-name") {
+                        if (m_icyName) {
+                            CFRelease(m_icyName);
+                        }
+                        m_icyName = createHeaderValueString(fieldValue);
+
+                        if (m_delegate && m_icyName) {
+                            std::map<CFStringRef,CFStringRef> metadataMap;
+                            metadataMap[CFSTR("IcecastStationName")] = CFStringCreateCopy(kCFAllocatorDefault, m_icyName);
+                            m_delegate->streamMetaDataAvailable(metadataMap);
+                        }
+                    } else if (fieldName == "content-type") {
+                        if (m_contentType) {
+                            CFRelease(m_contentType);
+                        }
+                        m_contentType = createHeaderValueString(fieldValue);
+                    } else if (fieldName == "content-length") {
+                        m_contentLength = strtoull(fieldValue.c_str(), NULL, 10);
+                    }
+                }
             }
-            m_icyName = icyNameString;
-            
-            if (m_delegate) {
-                std::map<CFStringRef,CFStringRef> metadataMap;
-                
-                metadataMap[CFSTR("IcecastStationName")] = CFStringCreateCopy(kCFAllocatorDefault, m_icyName);
-                
-                m_delegate->streamMetaDataAvailable(metadataMap);
-            }
         }
-        
-        if (m_contentType) {
-            CFRelease(m_contentType);
+
+        if (lineEnd == headers.length()) {
+            break;
         }
-        
-        m_contentType = CFHTTPMessageCopyHeaderFieldValue(response, CFSTR("Content-Type"));
-        
-        HS_TRACE("Content-type: ");
-        HS_TRACE_CFSTRING(m_contentType);
-        
-        CFStringRef contentLengthString = CFHTTPMessageCopyHeaderFieldValue(response, CFSTR("Content-Length"));
-        if (contentLengthString) {
-            m_contentLength = CFStringGetIntValue(contentLengthString);
-            
-            CFRelease(contentLengthString);
-        }
-        
-        CFRelease(response);
+        lineStart = lineEnd + 1;
     }
-       
-    if (m_delegate &&
-        (statusCode == 200 || statusCode == 206)) {
+
+    HS_TRACE("icy-metaint: %zu\n", m_icyMetaDataInterval);
+    HS_TRACE("HTTP response code %zu", statusCode);
+
+    if (m_delegate && (statusCode == 200 || statusCode == 206)) {
         m_delegate->streamIsReadyRead();
-    } else {
-        if (m_delegate) {
-            CFStringRef statusCodeString = CFStringCreateWithFormat(NULL,
-                                                                    NULL,
-                                                                    CFSTR("HTTP response code %d"),
-                                                                    (unsigned int)statusCode);
-            m_delegate->streamErrorOccurred(statusCodeString);
-            
-            if (statusCodeString) {
-                CFRelease(statusCodeString);
-            }
+    } else if (m_delegate) {
+        CFStringRef statusCodeString = CFStringCreateWithFormat(NULL,
+                                                                NULL,
+                                                                CFSTR("HTTP response code %d"),
+                                                                (unsigned int)statusCode);
+        m_delegate->streamErrorOccurred(statusCodeString);
+
+        if (statusCodeString) {
+            CFRelease(statusCodeString);
         }
     }
+
+    size_t bodyStart = headerEnd + delimiterLength;
+    if (bodyOffset && bodyStart > previousSize) {
+        *bodyOffset = static_cast<CFIndex>(bodyStart - previousSize);
+    }
+
+    m_httpHeaderData.clear();
+    return true;
 }
     
 void HTTP_Stream::parseICYStream(const UInt8 *buf, const CFIndex bufSize)
@@ -899,27 +1088,36 @@ void HTTP_Stream::readCallBack(CFReadStreamRef stream, CFStreamEventType eventTy
                 }
                 
                 if (bytesRead > 0) {
-                    THIS->m_bytesRead += bytesRead;
-                    
-                    HS_TRACE("Read %li bytes, total %llu\n", bytesRead, THIS->m_bytesRead);
-                    
-                    THIS->parseHttpHeadersIfNeeded(THIS->m_httpReadBuffer, bytesRead);
-                    
+                    CFIndex bodyOffset = 0;
+                    if (!THIS->parseHttpHeadersIfNeeded(THIS->m_httpReadBuffer, bytesRead, &bodyOffset)) {
+                        continue;
+                    }
+
+                    if (bodyOffset >= bytesRead) {
+                        continue;
+                    }
+
+                    UInt8 *bodyBuffer = THIS->m_httpReadBuffer + bodyOffset;
+                    CFIndex bodyBytesRead = bytesRead - bodyOffset;
+                    THIS->m_bytesRead += bodyBytesRead;
+
+                    HS_TRACE("Read %li bytes, total %llu\n", bodyBytesRead, THIS->m_bytesRead);
+
     #ifdef INCLUDE_ID3TAG_SUPPORT
                     if (!THIS->m_icyStream && THIS->m_id3Parser->wantData()) {
-                        THIS->m_id3Parser->feedData(THIS->m_httpReadBuffer, (UInt32)bytesRead);
+                        THIS->m_id3Parser->feedData(bodyBuffer, (UInt32)bodyBytesRead);
                     }
     #endif
-                    
+
                     if (THIS->m_icyStream) {
                         HS_TRACE("Parsing ICY stream\n");
-                        
-                        THIS->parseICYStream(THIS->m_httpReadBuffer, bytesRead);
+
+                        THIS->parseICYStream(bodyBuffer, bodyBytesRead);
                     } else {
                         if (THIS->m_delegate) {
                             HS_TRACE("Not an ICY stream; calling the delegate back\n");
-                            
-                            THIS->m_delegate->streamHasBytesAvailable(THIS->m_httpReadBuffer, (UInt32)bytesRead);
+
+                            THIS->m_delegate->streamHasBytesAvailable(bodyBuffer, (UInt32)bodyBytesRead);
                         }
                     }
                 }

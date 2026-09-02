@@ -23,20 +23,16 @@ private:
     HTTP_Stream(const HTTP_Stream&);
     HTTP_Stream& operator=(const HTTP_Stream&);
     
-    static CFStringRef httpRequestMethod;
-    static CFStringRef httpUserAgentHeader;
-    static CFStringRef httpRangeHeader;
-    static CFStringRef icyMetaDataHeader;
-    static CFStringRef icyMetaDataValue;
-    
     CFURLRef m_url;
     CFReadStreamRef m_readStream;
+    CFWriteStreamRef m_writeStream;
     bool m_scheduledInRunLoop;
     bool m_readPending;
     Input_Stream_Position m_position;
     
     /* HTTP headers */
     bool m_httpHeadersParsed;
+    std::vector<UInt8> m_httpHeaderData;
     CFStringRef m_contentType;
     size_t m_contentLength;
     UInt64 m_bytesRead;
@@ -63,7 +59,8 @@ private:
     ID3_Parser *m_id3Parser;
     
     CFReadStreamRef createReadStream(CFURLRef url);
-    void parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize);
+    bool sendHTTPRequest(CFWriteStreamRef writeStream, CFURLRef url);
+    bool parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize, CFIndex *bodyOffset);
     void parseICYStream(const UInt8 *buf, const CFIndex bufSize);
     CFStringRef createMetaDataStringWithMostReasonableEncoding(const UInt8 *bytes, const CFIndex numBytes);
     
