@@ -415,11 +415,20 @@ public:
         
         if ([fsAudioStreamPrivateActiveSessions count] == 0) {
             if (self.configuration.automaticAudioSessionHandlingEnabled) {
+AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+                if (@available(iOS 27.0, *)) {
+                    [audioSession deactivateWithOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                       completionHandler:^(BOOL success, NSError *error) {
+                    }];
+                } else {
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
 #if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 60000)
-                [[AVAudioSession sharedInstance] setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+                        [audioSession setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
 #else
-                [[AVAudioSession sharedInstance] setActive:NO error:nil];
+                        [audioSession setActive:NO error:nil];
 #endif
+                    });
+                }
             }
         }
     }
@@ -588,6 +597,8 @@ public:
     }
     return nil;
 }
+
+
 
 - (void)setOutputFile:(NSURL *)outputFile
 {
@@ -777,7 +788,16 @@ public:
             if ([interruptionResume intValue] == AVAudioSessionInterruptionOptionShouldResume) {
                 @synchronized (self) {
                     if (self.configuration.automaticAudioSessionHandlingEnabled) {
-                        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+                        AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+            if (@available(iOS 27.0, *)) {
+                [audioSession activateWithOptions:AVAudioSessionActivationOptionNone
+                                 completionHandler:^(BOOL success, NSError *error) {
+                }];
+            } else {
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                    [audioSession setActive:YES error:nil];
+                });
+            }
                     }
                     fsAudioStreamPrivateActiveSessions[[NSNumber numberWithUnsignedLong:(unsigned long)self]] = @"";
                 }
@@ -841,7 +861,22 @@ public:
 #if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 40000)
     @synchronized (self) {
         if (self.configuration.automaticAudioSessionHandlingEnabled) {
-            [[AVAudioSession sharedInstance] setActive:YES error:nil];
+            AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+            if (@available(iOS 27.0, *)) {
+                [audioSession activateWithOptions:AVAudioSessionActivationOptionNone
+                                completionHandler:^(BOOL success, NSError *error) {
+                                    if (!success) {
+                                        NSLog(@"FSAudioStream: Unable to activate audio session: %@", error);
+                                    }
+                                }];
+            } else {
+                NSError *error = nil;
+                if (![audioSession setActive:YES
+                                 withOptions:AVAudioSessionActivationOptionNone
+                                       error:&error]) {
+                    NSLog(@"FSAudioStream: Unable to activate audio session: %@", error);
+                }
+            }
         }
         fsAudioStreamPrivateActiveSessions[[NSNumber numberWithUnsignedLong:(unsigned long)self]] = @"";
     }
@@ -1173,13 +1208,14 @@ public:
     self.configuration.requiredInitialPrebufferedByteCountForNonContinuousStream = bufferSize;
 
     astreamer::Stream_Configuration *c = astreamer::Stream_Configuration::configuration();
-    
+
     c->requiredInitialPrebufferedByteCountForContinuousStream = bufferSize;
     c->requiredInitialPrebufferedByteCountForNonContinuousStream = bufferSize;
 }
 
 -(NSString *)description
 {
+
     return [NSString stringWithFormat:@"[FreeStreamer %@] URL: %@\nbufferCount: %i\nbufferSize: %i\nmaxPacketDescs: %i\nhttpConnectionBufferSize: %i\noutputSampleRate: %f\noutputNumChannels: %ld\nbounceInterval: %i\nmaxBounceCount: %i\nstartupWatchdogPeriod: %i\nmaxPrebufferedByteCount: %i\nformat: %@\nbit rate: %f\nuserAgent: %@\ncacheDirectory: %@\npredefinedHttpHeaderValues: %@\ncacheEnabled: %@\nseekingFromCacheEnabled: %@\nautomaticAudioSessionHandlingEnabled: %@\nenableTimeAndPitchConversion: %@\nrequireStrictContentTypeChecking: %@\nmaxDiskCacheSize: %i\nusePrebufferSizeCalculationInSeconds: %@\nusePrebufferSizeCalculationInPackets: %@\nrequiredPrebufferSizeInSeconds: %f\nrequiredInitialPrebufferedByteCountForContinuousStream: %i\nrequiredInitialPrebufferedByteCountForNonContinuousStream: %i\nrequiredInitialPrebufferedPacketCount: %i",
             freeStreamerReleaseVersion(),
             self.url,
@@ -1771,6 +1807,7 @@ void AudioStreamStateObserver::audioStreamErrorOccurred(int errorCode, CFStringR
             
             break;
         case kFsAudioStreamErrorUnsupportedFormat:
+
             error = kFsAudioStreamErrorUnsupportedFormat;
     
 #if defined(DEBUG) || (TARGET_IPHONE_SIMULATOR)
@@ -1780,6 +1817,7 @@ void AudioStreamStateObserver::audioStreamErrorOccurred(int errorCode, CFStringR
             break;
             
         case kFsAudioStreamErrorStreamBouncing:
+
             error = kFsAudioStreamErrorStreamBouncing;
             
 #if defined(DEBUG) || (TARGET_IPHONE_SIMULATOR)
