@@ -838,7 +838,19 @@ AVAudioSession *audioSession = [AVAudioSession sharedInstance];
         if ([fsAudioStreamPrivateActiveSessions count] == 0) {
             if (self.configuration.automaticAudioSessionHandlingEnabled) {
 #if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 60000)
-                [[AVAudioSession sharedInstance] setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+                AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+                if (@available(iOS 27.0, *)) {
+                    [audioSession deactivateWithOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                      completionHandler:^(BOOL success, NSError *error) {
+                                          if (!success) {
+                                              NSLog(@"FSAudioStream: Unable to deactivate audio session: %@", error);
+                                          }
+                                      }];
+                } else {
+                    [audioSession setActive:NO
+                                withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                      error:nil];
+                }
 #else
                 [[AVAudioSession sharedInstance] setActive:NO error:nil];
 #endif
