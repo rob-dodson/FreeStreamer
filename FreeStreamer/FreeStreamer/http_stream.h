@@ -12,6 +12,7 @@
 #import <CFNetwork/CFNetwork.h>
 #import <vector>
 #import <map>
+#import <string>
 #import "input_stream.h"
 #import "id3_parser.h"
 
@@ -33,6 +34,7 @@ private:
     /* HTTP headers */
     bool m_httpHeadersParsed;
     std::vector<UInt8> m_httpHeaderData;
+    unsigned int m_redirectCount;
     CFStringRef m_contentType;
     size_t m_contentLength;
     UInt64 m_bytesRead;
@@ -60,7 +62,8 @@ private:
     
     CFReadStreamRef createReadStream(CFURLRef url);
     bool sendHTTPRequest(CFWriteStreamRef writeStream, CFURLRef url);
-    bool parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize, CFIndex *bodyOffset);
+    bool parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize, CFIndex *bodyOffset, bool *redirectHandled);
+    bool followRedirect(const std::string& location);
     void parseICYStream(const UInt8 *buf, const CFIndex bufSize);
     CFStringRef createMetaDataStringWithMostReasonableEncoding(const UInt8 *bytes, const CFIndex numBytes);
     

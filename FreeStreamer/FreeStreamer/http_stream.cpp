@@ -106,6 +106,7 @@ HTTP_Stream::HTTP_Stream() :
     m_readPending(false),
     m_url(0),
     m_httpHeadersParsed(false),
+    m_redirectCount(0),
     m_contentType(0),
     m_contentLength(0),
     m_bytesRead(0),
@@ -188,6 +189,7 @@ bool HTTP_Stream::open()
     position.end = 0;
     
     m_contentLength = 0;
+    m_redirectCount = 0;
 #ifdef INCLUDE_ID3TAG_SUPPORT
     m_id3Parser->reset();
 #endif
@@ -546,10 +548,83 @@ bool HTTP_Stream::sendHTTPRequest(CFWriteStreamRef writeStream, CFURLRef url)
     return success;
 }
     
-bool HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize, CFIndex *bodyOffset)
+bool HTTP_Stream::followRedirect(const std::string& location)
+{
+    const unsigned int maximumRedirectCount = 10;
+    bool followed = false;
+    CFStringRef locationString = createHeaderValueString(location);
+    CFURLRef redirectURL = NULL;
+    CFURLRef absoluteRedirectURL = NULL;
+    CFStringRef redirectScheme = NULL;
+    CFStringRef redirectHost = NULL;
+    bool isHTTPRedirect = false;
+
+    if (m_redirectCount >= maximumRedirectCount) {
+        goto out;
+    }
+
+    if (locationString) {
+        redirectURL = CFURLCreateWithString(kCFAllocatorDefault, locationString, m_url);
+    }
+    if (redirectURL) {
+        absoluteRedirectURL = CFURLCopyAbsoluteURL(redirectURL);
+    }
+    if (!absoluteRedirectURL) {
+        goto out;
+    }
+
+    redirectScheme = CFURLCopyScheme(absoluteRedirectURL);
+    isHTTPRedirect = redirectScheme &&
+        (CFStringCompare(redirectScheme, CFSTR("http"), kCFCompareCaseInsensitive) == kCFCompareEqualTo ||
+         CFStringCompare(redirectScheme, CFSTR("https"), kCFCompareCaseInsensitive) == kCFCompareEqualTo);
+    redirectHost = CFURLCopyHostName(absoluteRedirectURL);
+    if (!isHTTPRedirect || !redirectHost) {
+        goto out;
+    }
+
+    ++m_redirectCount;
+    close();
+    setUrl(absoluteRedirectURL);
+    followed = open(m_position);
+
+out:
+    if (!followed) {
+        close();
+        if (m_delegate) {
+            CFStringRef error = CFStringCreateWithCString(kCFAllocatorDefault,
+                                                           "Unable to follow HTTP redirect",
+                                                           kCFStringEncodingUTF8);
+            m_delegate->streamErrorOccurred(error);
+            if (error) {
+                CFRelease(error);
+            }
+        }
+    }
+    if (redirectHost) {
+        CFRelease(redirectHost);
+    }
+    if (redirectScheme) {
+        CFRelease(redirectScheme);
+    }
+    if (absoluteRedirectURL) {
+        CFRelease(absoluteRedirectURL);
+    }
+    if (redirectURL) {
+        CFRelease(redirectURL);
+    }
+    if (locationString) {
+        CFRelease(locationString);
+    }
+    return followed;
+}
+
+bool HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSize, CFIndex *bodyOffset, bool *redirectHandled)
 {
     if (bodyOffset) {
         *bodyOffset = 0;
+    }
+    if (redirectHandled) {
+        *redirectHandled = false;
     }
 
     if (m_httpHeadersParsed) {
@@ -606,6 +681,7 @@ bool HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSi
 
     std::string headers(reinterpret_cast<const char *>(&m_httpHeaderData[0]), headerEnd);
     CFIndex statusCode = 0;
+    std::string redirectLocation;
 
     size_t lineStart = 0;
     bool firstLine = true;
@@ -631,7 +707,9 @@ bool HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSi
                     std::string fieldName = lowercaseString(stringByTrimmingHTTPWhitespace(line.substr(0, separator)));
                     std::string fieldValue = stringByTrimmingHTTPWhitespace(line.substr(separator + 1));
 
-                    if (fieldName == "icy-metaint") {
+                    if (fieldName == "location") {
+                        redirectLocation = fieldValue;
+                    } else if (fieldName == "icy-metaint") {
                         m_icyStream = true;
                         m_icyHeadersParsed = true;
                         m_icyHeadersRead = true;
@@ -667,6 +745,16 @@ bool HTTP_Stream::parseHttpHeadersIfNeeded(const UInt8 *buf, const CFIndex bufSi
 
     HS_TRACE("icy-metaint: %zu\n", m_icyMetaDataInterval);
     HS_TRACE("HTTP response code %zu", statusCode);
+
+    const bool isRedirect = statusCode == 301 || statusCode == 302 || statusCode == 303 ||
+        statusCode == 307 || statusCode == 308;
+    if (isRedirect && !redirectLocation.empty()) {
+        if (redirectHandled) {
+            *redirectHandled = true;
+        }
+        followRedirect(redirectLocation);
+        return false;
+    }
 
     if (m_delegate && (statusCode == 200 || statusCode == 206)) {
         m_delegate->streamIsReadyRead();
@@ -1089,7 +1177,11 @@ void HTTP_Stream::readCallBack(CFReadStreamRef stream, CFStreamEventType eventTy
                 
                 if (bytesRead > 0) {
                     CFIndex bodyOffset = 0;
-                    if (!THIS->parseHttpHeadersIfNeeded(THIS->m_httpReadBuffer, bytesRead, &bodyOffset)) {
+                    bool redirectHandled = false;
+                    if (!THIS->parseHttpHeadersIfNeeded(THIS->m_httpReadBuffer, bytesRead, &bodyOffset, &redirectHandled)) {
+                        if (redirectHandled) {
+                            break;
+                        }
                         continue;
                     }
 
